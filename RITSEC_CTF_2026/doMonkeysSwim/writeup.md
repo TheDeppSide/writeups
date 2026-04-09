@@ -255,6 +255,27 @@ The main issue here is that we have no pointers to a `/bin/sh\x00` string in the
 
 > **NOTE:** Appending strings to the end of the payload is a common pwn technique. If we placed the string *before* the gadgets, `fgets` would stop reading as soon as it hit the null byte (`\x00`), and we wouldn't be able to write the rest of our ROP chain!
 
+**Wait, there is a massive catch here!**
+If we just blindly place our ROP gadgets at the start of `.bss` and pivot `RBP` over, we will crash the binary before `RIP` is ever popped. Why? Because of the Stack Smashing Protector (SSP). Let's look at the assembly for the end of `game()`:
+
+```nasm
+0x401ee7 <game+157>    nop    
+0x401ee8 <game+158>    mov    rax, qword ptr [rbp - 8]     ; RAX, [bed] => 0x4cca68 (bed+8)
+0x401eec <game+162>    sub    rax, qword ptr fs:[0x28]     ; RAX => 0x9b2b856521643f68
+0x401ef5 <game+171>    je     game+178                     ; <game+178>
+0x401ef7 <game+173>    call   __stack_chk_fail_local       ; <__stack_chk_fail_local>
+
+0x401efc <game+178>    leave  
+0x401efd <game+179>    ret   
+```
+
+Notice the instruction at `0x401ee8`: `mov rax, qword ptr [rbp - 8]`. The canary check doesn't use a static offset from `RSP`; it checks relative to **`RBP`**! 
+
+Because we overwrote `RBP` with our `.bss` address during the overflow, the program tries to validate the canary *using our fake `RBP`*. 
+If we set `fake_rbp = start + 0x8`, then `rbp - 8` points exactly to `start` (`0x4cca60`). 
+
+This means the very first 8 bytes of our `.bss` payload **MUST be the leaked canary**. If we start our payload immediately with a ROP gadget, the XOR check against `fs:[0x28]` will fail, and the binary will scream `__stack_chk_fail_local` and die before we can `leave; ret`.
+
 ### Step 4: Trigger the Pivot
 Finally, we have everything set up. We just need to end the program gracefully to trigger the `leave; ret` epilogue and execute the stack pivot. Since we are inside a `while(true)` loop in `game()`, we can simply select the `exit` option (option `6`) from the menu. `monkey_do()` will return, pivoting our stack into `.bss` and popping a shell!
 
